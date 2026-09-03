@@ -50,10 +50,15 @@ omarchy agent usage update muse --force
 ```
 
 The installer copies the collector to `/usr/bin/omarchy-agent-usage-muse`
-(requires `sudo`), validates its output, and refreshes the usage record.
+(requires `sudo`), links it into `$OMARCHY_PATH/bin` so
+`omarchy-agent-usage-update` discovers it (the stock agents are symlinks
+there too — without the link the refresh exits 0 but silently writes no
+record), validates its output, refreshes the usage record, and fails if no
+record was written.
 The panel picks up the Muse tab on its next refresh — or press `r` with
 the panel open. The file is not owned by any pacman package, so it
-survives `omarchy update`.
+survives `omarchy update`; the link under `/usr/share` may be reset by
+system updates, in which case just re-run `./install.sh`.
 
 Optional: `./install.sh --with-assets` also installs the Muse marks into
 the Agents plugin assets. Stock Omarchy has no `muse.svg`, and the panel
