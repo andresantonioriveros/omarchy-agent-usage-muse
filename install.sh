@@ -8,7 +8,8 @@ for arg in "$@"; do
     --with-assets) WITH_ASSETS=true ;;
     -h|--help)
       echo "Usage: ./install.sh [--with-assets]"
-      echo "  Installs omarchy-agent-usage-muse to /usr/bin and refreshes the usage record."
+      echo "  Installs omarchy-agent-usage-muse to /usr/bin, links it into"
+      echo "  \$OMARCHY_PATH/bin for discovery, and refreshes the usage record."
       echo "  --with-assets also installs the Muse marks into the Agents plugin assets."
       exit 0
       ;;
@@ -33,6 +34,17 @@ fi
 echo "-> installing $TARGET (sudo)"
 sudo install -m755 "$COLLECTOR" "$TARGET"
 
+# omarchy-agent-usage-update only discovers collectors in $OMARCHY_PATH/bin,
+# where the stock agents are symlinks to /usr/bin. Without this link the
+# refresh below exits 0 but silently writes no muse record.
+OMARCHY_BIN_DIR="${OMARCHY_PATH:-/usr/share/omarchy}/bin"
+if [[ -d $OMARCHY_BIN_DIR ]]; then
+  echo "-> linking $OMARCHY_BIN_DIR/omarchy-agent-usage-muse (sudo; may need re-linking after system updates)"
+  sudo ln -sf "$TARGET" "$OMARCHY_BIN_DIR/omarchy-agent-usage-muse"
+else
+  echo "omarchy bin dir not found, skipping link (refresh will write no record): $OMARCHY_BIN_DIR" >&2
+fi
+
 if [[ $WITH_ASSETS == "true" ]]; then
   ASSETS_DIR="/usr/share/omarchy/shell/plugins/agents/assets"
   if [[ -d $ASSETS_DIR ]]; then
@@ -46,4 +58,11 @@ fi
 echo "-> refreshing usage record"
 omarchy agent usage update muse --force
 
-echo "ok: open the Agents panel (press 'r' inside it to refresh now)"
+USAGE_RECORD="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage/muse.json"
+if [[ -s $USAGE_RECORD ]]; then
+  echo "ok: open the Agents panel (press 'r' inside it to refresh now)"
+else
+  echo "warning: refresh wrote no record at $USAGE_RECORD;" >&2
+  echo "warning: the panel will not show a Muse tab until the collector is discoverable" >&2
+  exit 1
+fi
