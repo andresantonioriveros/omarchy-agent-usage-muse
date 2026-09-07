@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Muse usage record every 10 minutes
+
+[Timer]
+# Shorter than the panel's own 15-minute refresh so the Muse tab is
+# typically fresher than the stock tabs, never staler by more than this.
+OnCalendar=*:0/10
+Persistent=true
+
+[Install]
+WantedBy=timers.target

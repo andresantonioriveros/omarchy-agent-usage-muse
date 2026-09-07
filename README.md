@@ -24,11 +24,13 @@ The record follows the stock contract (`schemaVersion`, `today*`,
 tokens-by-day, tokens-by-model, and prompt/session counts with zero panel
 changes.
 
-Deliberately no cost or balance section: Meta exposes no usage/billing API
-and no rate-limit response headers, so any credit figure would be an
-estimate. This collector reports measured usage only. The hero label is
-likewise left generic: the account may be prepaid credits or a
-subscription, and there is no local signal to tell them apart.
+Deliberately no cost or balance section: Meta exposes no usage/billing
+API, so any credit figure would be an estimate. (Per-minute throttle
+headers exist on inference endpoints, but there is no plan-window,
+quota, or ledger endpoint.) This collector reports measured usage
+only. The hero label is likewise left generic: the account may be
+prepaid credits or a subscription, and there is no local signal to
+tell them apart.
 
 ## Requirements
 
@@ -40,11 +42,27 @@ subscription, and there is no local signal to tell them apart.
 ## Install
 
 ```bash
-./install.sh
-omarchy agent usage update muse --force
+./install.sh            # user mode (default): sudo-free sidecar timer
+./install.sh --system   # system mode: drive through omarchy-agent-usage-update (sudo)
+./install.sh --uninstall
 ```
 
-The installer copies the collector to `/usr/bin/omarchy-agent-usage-muse`
+**User mode** copies the collector to `~/.local/bin` and publishes its
+record through a `systemd --user` timer every 10 minutes. The panel
+renders whatever valid JSON lands in the usage directory, so no system
+paths are touched and nothing needs re-linking after updates. The timer
+runs slightly ahead of the panel's own 15-minute refresh, so the Muse
+tab is typically fresher than the stock tabs.
+
+Two caveats of user mode: the panel's own refresh (`r` key, opening the
+panel) only reruns the stock collectors, so Muse freshness comes from
+the timer alone; and the sidecar **stands down whenever the update
+pipeline owns a muse collector** — a sudo install of this repo, or a
+future official upstream one — so two writers can never flap over
+`muse.json`. To migrate from system to user mode, uninstall the system
+files first; the next timer tick picks up publishing automatically.
+
+**System mode** copies the collector to `/usr/bin/omarchy-agent-usage-muse`
 (requires `sudo`), links it into `$OMARCHY_PATH/bin` so
 `omarchy-agent-usage-update` discovers it (the stock agents are symlinks
 there too — without the link the refresh exits 0 but silently writes no
@@ -53,7 +71,7 @@ record was written.
 The panel picks up the Muse tab on its next refresh — or press `r` with
 the panel open. The file is not owned by any pacman package, so it
 survives `omarchy update`; the link under `/usr/share` may be reset by
-system updates, in which case just re-run `./install.sh`.
+system updates, in which case just re-run `./install.sh --system`.
 
 Optional: `./install.sh --with-assets` also installs the Muse marks into
 the Agents plugin assets. Stock Omarchy has no `muse.svg`, and the panel
