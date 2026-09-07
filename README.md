@@ -26,9 +26,9 @@ changes.
 
 Deliberately no cost or balance section: Meta exposes no usage/billing API
 and no rate-limit response headers, so any credit figure would be an
-estimate. This collector reports measured usage only. The panel hero shows
-PREPAID, a static billing-model label — Muse Spark is prepaid credits, not
-a subscription.
+estimate. This collector reports measured usage only. The hero label is
+likewise left generic: the account may be prepaid credits or a
+subscription, and there is no local signal to tell them apart.
 
 ## Requirements
 
