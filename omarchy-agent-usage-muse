@@ -2,22 +2,19 @@
 # omarchy:summary=Print the Muse (Meta) usage record as JSON
 # omarchy:args=[--force] [--limits-only]
 # omarchy:hidden=true
-"""Collect Muse (Meta Muse Spark) usage into one display-ready JSON record.
+"""Collect Muse (Meta Muse Spark) local usage into one display-ready JSON record.
 
-Sources (all local, no network):
+Pure metering, no cost estimation and no network: token counts, prompt and
+session counts, per-day and per-model breakdowns. Sources (all local):
   - native `muse` CLI sessions in ~/.local/share/muse/sessions/**/session.jsonl
     (`model_completed` run events carry per-step token usage + model id),
   - opencode sessions with providerID == "meta" (any Muse Spark model),
   - opencode sessions with providerID == "opencode" whose modelID contains
     "muse-spark" (e.g. muse-spark-1.3-contributor-free via the opencode proxy).
 
-Costs prefer opencode's own `cost` field (already priced per tier); native
-sessions and rows without a cost fall back to the Muse Spark rate card
-(standard: 1.25 / 4.25 / 0.15 cached per M; contributor data-sharing tier:
-0.10 / 0.20 / 0.002 cached per M). The prepaid balance estimates the $20
-free-credit ledger from ~/.config/omarchy/agents/muse.json minus rated
-contributor spend since fundedAt. The agents panel only ever reads the JSON
-this prints.
+Meta exposes no usage/billing API and no rate-limit headers, so there is no
+balance or limits section — the agents panel only ever reads the JSON this
+prints and renders the measured usage.
 """
 
 import argparse
@@ -31,61 +28,15 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 AGENT_ID = "muse"
 AGENT_NAME = "Muse"
 AUTH_HELP = "Run `muse login` or set the meta API key in opencode auth.json."
 
-# Standard Muse Spark rate card (per million tokens, USD).
-PRICE_INPUT = Decimal("1.25")
-PRICE_OUTPUT = Decimal("4.25")
-PRICE_CACHED = Decimal("0.15")
-# Discounted contributor (data-sharing) tier.
-PRICE_CONTRIB_INPUT = Decimal("0.10")
-PRICE_CONTRIB_OUTPUT = Decimal("0.20")
-PRICE_CONTRIB_CACHED = Decimal("0.002")
-
-_catalog_prices = None
-
-
-def catalog_prices():
-  """Per-model rates from the muse CLI's provider catalog, if present.
-
-  Falls back to None entries so callers use the hardcoded rate card.
-  """
-  global _catalog_prices
-  if _catalog_prices is None:
-    prices = {}
-    try:
-      root = Path.home() / ".local" / "share" / "muse" / "model-catalog"
-      if root.is_dir():
-        for path in root.glob("*.json"):
-          try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-          except Exception:
-            continue
-          rows = data.get("rows") if isinstance(data, dict) else None
-          if not isinstance(rows, list):
-            continue
-          for row in rows:
-            if not isinstance(row, dict):
-              continue
-            model = str(row.get("model_id") or "").lower()
-            cost = row.get("cost") or {}
-            if not model or not isinstance(cost, dict):
-              continue
-            try:
-              prices[model] = (Decimal(str(cost.get("input", ""))),
-                               Decimal(str(cost.get("output", ""))),
-                               Decimal(str(cost.get("cached", ""))))
-            except (InvalidOperation, ValueError):
-              continue
-    except OSError:
-      pass
-    _catalog_prices = prices
-  return _catalog_prices
+# Cache schema version. Bump when the cached stats shape changes so old
+# caches are rescanned instead of trusted.
+CACHE_SCHEMA_VERSION = 2
 
 # Same cache semantics as the codex collector: a scan this recent only dedups
 # concurrent collector runs; --limits-only may reuse a scan for 15 minutes.
@@ -103,14 +54,6 @@ def number(value):
 def model_name(raw):
   value = str(raw or "muse-spark").rstrip("/").split("/")[-1]
   return value if value else "muse-spark"
-
-
-def is_contributor(model):
-  return "contributor" in str(model or "").lower()
-
-
-def is_muse_spark_model(model):
-  return "muse-spark" in str(model or "").lower() or "muse" in str(model or "").lower()
 
 
 def local_day(value):
@@ -142,23 +85,6 @@ def local_day(value):
     return datetime.now().astimezone().date().isoformat()
 
 
-def priced_cost(model, input_tokens, output_tokens, cache_read):
-  """Fallback cost when a row carries no priced `cost` field."""
-  prices = catalog_prices().get(str(model or "").lower())
-  if prices is None:
-    if is_contributor(model):
-      prices = (PRICE_CONTRIB_INPUT, PRICE_CONTRIB_OUTPUT, PRICE_CONTRIB_CACHED)
-    else:
-      prices = (PRICE_INPUT, PRICE_OUTPUT, PRICE_CACHED)
-  per_in, per_out, per_cached = prices
-  million = Decimal(1000000)
-  return (
-    Decimal(max(0, input_tokens)) * per_in
-    + Decimal(max(0, output_tokens)) * per_out
-    + Decimal(max(0, cache_read)) * per_cached
-  ) / million
-
-
 now = datetime.now().astimezone()
 today = now.date().isoformat()
 recent_dates = [(now.date() - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
@@ -172,22 +98,16 @@ today_prompts = 0
 today_total_tokens = 0
 total_prompts = 0
 total_sessions = set()
-contributor_cost_total = Decimal("0")
-# (created_ms_or_None, is_contributor, cost) for fundedAt-windowed spend.
-cost_entries = []
 
 
-def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, cache_write, cost, created_ms):
-  global today_prompts, today_total_tokens, total_prompts, contributor_cost_total
+def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, cache_write):
+  global today_prompts, today_total_tokens, total_prompts
   total = input_tokens + output_tokens + cache_read + cache_write
   if total <= 0:
     return
   total_prompts += 1
   total_sessions.add(session_key)
   active_days.add(day)
-  if is_contributor(model):
-    contributor_cost_total += cost
-  cost_entries.append((created_ms, is_contributor(model), cost))
 
   bucket = model_usage.setdefault(model, {
     "inputTokens": 0,
@@ -304,20 +224,11 @@ def scan_native_muse_sessions():
       if not (input_tokens or output_tokens or cache_read or cache_write):
         continue
       day = local_day(recorded_at) if recorded_at else mtime_day
-      cost = priced_cost(model, input_tokens, output_tokens, cache_read)
-      created_ms = None
-      try:
-        if recorded_at and float(recorded_at) > 10_000_000_000_000:
-          created_ms = int(float(recorded_at) / 1000)
-        elif recorded_at:
-          created_ms = int(float(recorded_at))
-      except Exception:
-        created_ms = None
       # Subagent trees roll up into their parent session: one user session,
       # one session count, however many subagents it spawned.
       session_key = "muse:" + re.sub(r"/subagent/.*$", "", str(path))
       add_usage(day, session_key, model,
-                input_tokens, output_tokens, cache_read, cache_write, cost, created_ms)
+                input_tokens, output_tokens, cache_read, cache_write)
 
 
 def scan_opencode_sessions():
@@ -357,8 +268,8 @@ def scan_opencode_sessions():
           continue
         tokens = entry.get("tokens") or {}
         cache = tokens.get("cache") or {}
-        # opencode reports input EXCLUSIVE of cache (calibrated against its
-        # authoritative cost field): keep the buckets separate, no subtraction.
+        # opencode reports input exclusive of cache: keep the token buckets
+        # separate, no subtraction.
         input_tokens = number(tokens.get("input"))
         output_tokens = number(tokens.get("output")) + number(tokens.get("reasoning"))
         cache_read = number(cache.get("read"))
@@ -367,22 +278,8 @@ def scan_opencode_sessions():
           continue
         created = (entry.get("time") or {}).get("created")
         day = local_day(created)
-        cost_raw = entry.get("cost")
-        if cost_raw is not None:
-          try:
-            cost = Decimal(str(cost_raw))
-          except (InvalidOperation, ValueError):
-            cost = priced_cost(model, input_tokens, output_tokens, cache_read)
-        else:
-          cost = priced_cost(model, input_tokens, output_tokens, cache_read)
-        created_ms = None
-        try:
-          if created is not None:
-            created_ms = int(created)
-        except Exception:
-          created_ms = None
         add_usage(day, "opencode:" + str(session_id), model,
-                  input_tokens, output_tokens, cache_read, cache_write, cost, created_ms)
+                  input_tokens, output_tokens, cache_read, cache_write)
       except Exception:
         continue
   except sqlite3.Error:
@@ -437,7 +334,7 @@ def write_json(path, payload):
 
 def read_cached_stats(cache_file, max_age_seconds):
   cached = read_fresh_json(cache_file, max_age_seconds)
-  if not isinstance(cached, dict) or cached.get("schemaVersion") != 1:
+  if not isinstance(cached, dict) or cached.get("schemaVersion") != CACHE_SCHEMA_VERSION:
     return None
   if cached.get("scanDate") != today:
     return None
@@ -445,7 +342,7 @@ def read_cached_stats(cache_file, max_age_seconds):
   if not isinstance(stats, dict):
     return None
   required = ("todayPrompts", "todayTotalTokens", "recentDays", "activeDates",
-              "modelUsage", "contributorCost", "costEntries")
+              "modelUsage")
   if not all(key in stats for key in required):
     return None
   return stats
@@ -453,7 +350,7 @@ def read_cached_stats(cache_file, max_age_seconds):
 
 def write_cached_stats(cache_file, stats):
   try:
-    write_json(cache_file, {"schemaVersion": 1, "scanDate": today, "stats": stats})
+    write_json(cache_file, {"schemaVersion": CACHE_SCHEMA_VERSION, "scanDate": today, "stats": stats})
   except Exception as exc:
     print(f"omarchy-agent-usage-muse: could not write usage cache ({exc})", file=sys.stderr)
 
@@ -470,20 +367,14 @@ def local_stats():
     "activeDays": len(active_days),
     "activeDates": sorted(active_days),
     "modelUsage": model_usage,
-    # Decimal is not JSON-serializable: persist as strings, restore below.
-    "contributorCost": str(contributor_cost_total),
-    "costEntries": [
-      [created if created is not None else 0, is_contrib, str(cost)]
-      for created, is_contrib, cost in cost_entries
-    ],
   }
 
 
 def restore_cached_stats(stats):
   """Restore module-level aggregates from a cached stats dict."""
-  global today_prompts, today_total_tokens, total_prompts, contributor_cost_total
+  global today_prompts, today_total_tokens, total_prompts
   global today_tokens_by_model, model_usage, recent
-  global today_sessions, total_sessions, active_days, cost_entries
+  global today_sessions, total_sessions, active_days
   today_prompts = number(stats.get("todayPrompts"))
   today_sessions = set(stats.get("todaySessionsList", []))
   today_total_tokens = number(stats.get("todayTotalTokens"))
@@ -495,18 +386,6 @@ def restore_cached_stats(stats):
   total_sessions = set(stats.get("totalSessionsList", []))
   active_days = set(stats.get("activeDates") or [])
   model_usage = dict(stats.get("modelUsage") or {})
-  try:
-    contributor_cost_total = Decimal(str(stats.get("contributorCost") or "0"))
-  except (InvalidOperation, ValueError):
-    contributor_cost_total = Decimal("0")
-  restored = []
-  for row in stats.get("costEntries") or []:
-    try:
-      created, is_contrib, cost = row
-      restored.append((int(created) or None, bool(is_contrib), Decimal(str(cost))))
-    except Exception:
-      continue
-  cost_entries = restored
   # Session identity sets cannot be rehydrated from counts alone; persist them
   # explicitly so a cached run reports the same session counts.
   return stats
@@ -546,57 +425,6 @@ def _cached_local_stats(max_age):
     return stats
 
 
-def read_agent_config():
-  path = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "omarchy" / "agents" / "muse.json"
-  tier_label = "Prepaid"
-  funded_amount = None
-  funded_at_str = ""
-  currency = "USD"
-  if path.is_file():
-    try:
-      cfg = json.loads(path.read_text(encoding="utf-8"))
-      if isinstance(cfg, dict):
-        label = str(cfg.get("tier") or cfg.get("tierLabel") or "").strip()
-        if label:
-          tier_label = label
-        if cfg.get("fundedAmount") is not None:
-          try:
-            funded_amount = Decimal(str(cfg.get("fundedAmount")))
-          except (InvalidOperation, ValueError):
-            funded_amount = None
-        funded_at_str = str(cfg.get("fundedAt") or "").strip()
-        currency = str(cfg.get("currency") or "USD").strip() or "USD"
-    except Exception:
-      pass
-  return tier_label, funded_amount, funded_at_str, currency
-
-
-def spent_since_funded(funded_at_str, fallback):
-  """Contributor spend on/after fundedAt (free-credit ledger semantics)."""
-  if not funded_at_str:
-    return fallback
-  try:
-    if len(funded_at_str) == 10:
-      funded_dt = datetime.fromisoformat(funded_at_str).replace(tzinfo=timezone.utc)
-    else:
-      funded_dt = datetime.fromisoformat(funded_at_str.replace("Z", "+00:00"))
-    funded_ms = int(funded_dt.timestamp() * 1000)
-  except Exception:
-    return fallback
-  windowed = Decimal("0")
-  dateless = Decimal("0")
-  for created, is_contrib, cost in cost_entries:
-    if not is_contrib:
-      continue
-    if created is None:
-      dateless += cost
-    elif created >= funded_ms:
-      windowed += cost
-  # Native sessions always carry recorded_at, so dateless only happens for
-  # exotic opencode rows; attribute those to the window rather than dropping.
-  return windowed + dateless
-
-
 def muse_authenticated():
   auth = Path.home() / ".config" / "muse" / "auth.json"
   if auth.is_file():
@@ -619,26 +447,6 @@ def main():
   max_age = 0 if args.force else (LIMITS_ONLY_REUSE_SECONDS if args.limits_only else SCAN_REUSE_SECONDS)
   stats = cached_local_stats(max_age)
 
-  tier_label, funded_amount, funded_at_str, currency = read_agent_config()
-  try:
-    contributor_cost = Decimal(str(stats.get("contributorCost") or "0"))
-  except (InvalidOperation, ValueError):
-    contributor_cost = Decimal("0")
-
-  balance = None
-  if funded_amount is not None and funded_amount > 0:
-    spent = spent_since_funded(funded_at_str, contributor_cost)
-    remaining = funded_amount - spent
-    if remaining < 0:
-      remaining = Decimal("0")
-    balance = {
-      "remaining": float(remaining),
-      "funded": float(funded_amount),
-      "spent": float(spent),
-      "currency": currency,
-      "estimated": True,
-    }
-
   authed = muse_authenticated()
   record = {
     "schemaVersion": 1,
@@ -659,18 +467,14 @@ def main():
     "activeDays": number(stats.get("activeDays")),
     "activeDates": stats.get("activeDates") or [],
     "modelUsage": stats.get("modelUsage") or {},
-    "tierLabel": tier_label,
-    # No rate-limit endpoint is known for the Meta API; auth problems surface
-    # here instead of a limits probe.
+    # No billing to report (metering only); the hero falls back to
+    # "Subscription". No rate-limit endpoint is known for the Meta API;
+    # auth problems surface here instead of a limits probe.
+    "tierLabel": "",
     "limits": [],
     "usageStatusText": "" if (authed or number(stats.get("totalPrompts")) > 0) else "Muse unavailable",
     "authHelpText": "" if authed else AUTH_HELP,
   }
-  if balance:
-    record["balance"] = balance
-    # NOTE: no "scope": "account" — token stats here are device-local sums
-    # (correct to sum across synced machines); only the balance is
-    # per-account, and the panel never merges balances.
   print(json.dumps(record, separators=(",", ":"), sort_keys=True))
 
 

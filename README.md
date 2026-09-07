@@ -16,24 +16,17 @@ Three local sources, no network calls:
 | Source | What |
 |---|---|
 | Native `muse` CLI sessions (`~/.local/share/muse/sessions/**/session.jsonl`) | Per-step token usage from `model_completed` run events |
-| opencode `meta`-provider sessions | Token usage + authoritative `cost` field |
-| opencode `muse-spark-*` proxy sessions (e.g. `-free` models) | Token usage (`cost` 0, stats only) |
+| opencode `meta`-provider sessions | Token usage |
+| opencode `muse-spark-*` proxy sessions (e.g. `-free` models) | Token usage |
 
 The record follows the stock contract (`schemaVersion`, `today*`,
-`recentDays`, `modelUsage`, `activeDates`, `tierLabel`, `balance`, …),
-so the panel lights up tokens-by-day, tokens-by-model, and the prepaid
-**balance gauge** with zero panel changes.
+`recentDays`, `modelUsage`, `activeDates`, …), so the panel lights up
+tokens-by-day, tokens-by-model, and prompt/session counts with zero panel
+changes.
 
-Costs prefer opencode's priced `cost` field; native sessions fall back to
-per-model rates read live from the CLI's own provider catalog
-(`~/.local/share/muse/model-catalog/`), with the public rate card as
-backup. The balance estimates the $20 free-credit ledger minus rated
-contributor spend since `fundedAt`, and is labeled `estimated` in the UI.
-
-Meta exposes **no** usage/limits API and no rate-limit response headers
-(verified against the public API reference, the CLI binary, and a live
-`GET /v1/models`), so reactive balance estimation is the best available
-signal — same situation as OpenAI/Anthropic balance tracking.
+Deliberately no cost or balance section: Meta exposes no usage/billing API
+and no rate-limit response headers, so any credit figure would be an
+estimate. This collector reports measured usage only.
 
 ## Requirements
 
@@ -62,22 +55,8 @@ falls back to the generic glyph without it; note these copies live under
 
 ## Configure
 
-Optional funding ledger, `~/.config/omarchy/agents/muse.json`:
-
-```json
-{
-  "tier": "Prepaid",
-  "fundedAmount": 20,
-  "fundedAt": "2026-07-01",
-  "currency": "USD"
-}
-```
-
-Or copy the template: `cp muse.json.example ~/.config/omarchy/agents/muse.json`.
-Without it, token stats still show — just no balance gauge.
-
-The Muse tab is enabled by default (unknown providers default to on).
-To hide it while keeping the collector:
+Nothing required. The Muse tab is enabled by default (unknown providers
+default to on). To hide it while keeping the collector:
 
 ```bash
 omarchy bar set omarchy.agents providers '{
