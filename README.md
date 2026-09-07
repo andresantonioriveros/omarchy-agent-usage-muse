@@ -52,7 +52,9 @@ record through a `systemd --user` timer every 10 minutes. The panel
 renders whatever valid JSON lands in the usage directory, so no system
 paths are touched and nothing needs re-linking after updates. The timer
 runs slightly ahead of the panel's own 15-minute refresh, so the Muse
-tab is typically fresher than the stock tabs.
+tab is typically fresher than the stock tabs. The installer validates
+the collector output first, then enables the timer and publishes the
+first record immediately, failing loudly if no record appears.
 
 Two caveats of user mode: the panel's own refresh (`r` key, opening the
 panel) only reruns the stock collectors, so Muse freshness comes from
@@ -61,6 +63,18 @@ pipeline owns a muse collector** — a sudo install of this repo, or a
 future official upstream one — so two writers can never flap over
 `muse.json`. To migrate from system to user mode, uninstall the system
 files first; the next timer tick picks up publishing automatically.
+
+Manage the timer directly with
+`systemctl --user status omarchy-agent-usage-muse.timer`, and force a
+refresh anytime with
+`systemctl --user start omarchy-agent-usage-muse.service`. The timer
+only runs while you are logged in, which is also the only time the
+panel exists to display its output.
+
+**Uninstall** (`./install.sh --uninstall`) disables and removes the
+timer, deletes the `~/.local/bin` copies, removes the system files via
+sudo (skipped gracefully without privileges), and deletes the
+`muse.json` record so the tab disappears.
 
 **System mode** copies the collector to `/usr/bin/omarchy-agent-usage-muse`
 (requires `sudo`), links it into `$OMARCHY_PATH/bin` so
