@@ -34,6 +34,14 @@ AGENT_ID = "muse"
 AGENT_NAME = "Muse"
 AUTH_HELP = "Run `muse login` or set the meta API key in opencode auth.json."
 
+# Model ids and session files are read from local data but flow into the
+# panel JSON, so bound them: overlong model names fail the row closed, the
+# model breakdown folds past MAX_TRACKED_MODELS into "other" (totals stay
+# exact), and symlinked or gigantic session files are skipped outright.
+MAX_MODEL_NAME_LEN = 120
+MAX_TRACKED_MODELS = 64
+MAX_SESSION_BYTES = 512 * 1024 * 1024
+
 # Cache schema version. Bump when the cached stats shape changes so old
 # caches are rescanned instead of trusted.
 CACHE_SCHEMA_VERSION = 2
@@ -53,7 +61,14 @@ def number(value):
 
 def model_name(raw):
   value = str(raw or "muse-spark").rstrip("/").split("/")[-1]
-  return value if value else "muse-spark"
+  if not value:
+    value = "muse-spark"
+  # Model ids flow into the panel JSON: cap the length so a crafted session
+  # file or DB row cannot bloat the record or the UI. Callers skip the row
+  # when this returns None (fail closed).
+  if len(value) > MAX_MODEL_NAME_LEN:
+    return None
+  return value
 
 
 def local_day(value):
@@ -100,6 +115,12 @@ total_prompts = 0
 total_sessions = set()
 
 
+def track_key(model):
+  if model in model_usage or len(model_usage) < MAX_TRACKED_MODELS:
+    return model
+  return "other"
+
+
 def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, cache_write):
   global today_prompts, today_total_tokens, total_prompts
   total = input_tokens + output_tokens + cache_read + cache_write
@@ -108,8 +129,9 @@ def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, 
   total_prompts += 1
   total_sessions.add(session_key)
   active_days.add(day)
+  key = track_key(model)
 
-  bucket = model_usage.setdefault(model, {
+  bucket = model_usage.setdefault(key, {
     "inputTokens": 0,
     "outputTokens": 0,
     "cacheReadInputTokens": 0,
@@ -126,11 +148,16 @@ def add_usage(day, session_key, model, input_tokens, output_tokens, cache_read, 
     today_prompts += 1
     today_sessions.add(session_key)
     today_total_tokens += total
-    today_tokens_by_model[model] = today_tokens_by_model.get(model, 0) + total
+    today_tokens_by_model[key] = today_tokens_by_model.get(key, 0) + total
 
 
 def muse_sessions_root():
-  return Path(os.environ.get("MUSE_DATA_DIR") or (Path.home() / ".local" / "share" / "muse")) / "sessions"
+  override = (os.environ.get("MUSE_DATA_DIR") or "").strip()
+  if override:
+    base = Path(os.path.expandvars(os.path.expanduser(override)))
+  else:
+    base = Path.home() / ".local" / "share" / "muse"
+  return base / "sessions"
 
 
 def iter_native_events(path):
@@ -185,11 +212,18 @@ def scan_native_muse_sessions():
   except OSError:
     return
   for path in files:
-    current_model = ""
     try:
-      mtime_day = local_day(path.stat().st_mtime)
+      # Fail closed on entries that could escape the sessions tree or stall
+      # the scan: symlinks are never followed and gigantic files are skipped.
+      if path.is_symlink():
+        continue
+      st = path.stat()
+      if st.st_size > MAX_SESSION_BYTES:
+        continue
+      mtime_day = local_day(st.st_mtime)
     except OSError:
-      mtime_day = today
+      continue
+    current_model = ""
     for payload, recorded_at in iter_native_events(path):
       kind = payload.get("kind")
       if kind == "metadata":
@@ -213,6 +247,8 @@ def scan_native_muse_sessions():
       if not isinstance(usage, dict):
         continue
       model = model_name(event.get("model") or current_model)
+      if model is None:
+        continue
       input_tokens = number(usage.get("input_tokens"))
       # Reasoning tokens are generated tokens: count them as output.
       output_tokens = number(usage.get("output_tokens")) + number(usage.get("reasoning_tokens"))
@@ -262,6 +298,8 @@ def scan_opencode_sessions():
           continue
         provider = str(entry.get("providerID") or "")
         model = model_name(entry.get("modelID"))
+        if model is None:
+          continue
         if provider == "meta":
           pass  # any meta model counts (muse-spark 1.1/1.2/1.3, ...)
         elif provider == "opencode" and "muse-spark" in model.lower():
@@ -378,16 +416,29 @@ def restore_cached_stats(stats):
   global today_tokens_by_model, model_usage, recent
   global today_sessions, total_sessions, active_days
   today_prompts = number(stats.get("todayPrompts"))
-  today_sessions = set(stats.get("todaySessionsList", []))
+  # Session identities come from a cache file any local process could have
+  # rewritten: keep strings only so counts and JSON output stay well-formed.
+  today_sessions = {s for s in (stats.get("todaySessionsList") or []) if isinstance(s, str)}
   today_total_tokens = number(stats.get("todayTotalTokens"))
-  today_tokens_by_model = dict(stats.get("todayTokensByModel") or {})
+  # Model keys also flow into the record: apply the same length bound the
+  # live scan enforces, and coerce values back to numbers.
+  today_tokens_by_model = {
+    k: number(v) for k, v in dict(stats.get("todayTokensByModel") or {}).items()
+    if isinstance(k, str) and len(k) <= MAX_MODEL_NAME_LEN
+  }
   for row in stats.get("recentDays") or []:
     if isinstance(row, dict) and row.get("date") in recent:
       recent[row["date"]] = number(row.get("messageCount"))
   total_prompts = number(stats.get("totalPrompts"))
-  total_sessions = set(stats.get("totalSessionsList", []))
-  active_days = set(stats.get("activeDates") or [])
-  model_usage = dict(stats.get("modelUsage") or {})
+  total_sessions = {s for s in (stats.get("totalSessionsList") or []) if isinstance(s, str)}
+  active_days = {
+    d for d in (stats.get("activeDates") or [])
+    if isinstance(d, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)
+  }
+  model_usage = {
+    k: v for k, v in dict(stats.get("modelUsage") or {}).items()
+    if isinstance(k, str) and len(k) <= MAX_MODEL_NAME_LEN and isinstance(v, dict)
+  }
   # Session identity sets cannot be rehydrated from counts alone; persist them
   # explicitly so a cached run reports the same session counts.
   return stats
@@ -469,9 +520,10 @@ def main():
     "activeDays": number(stats.get("activeDays")),
     "activeDates": stats.get("activeDates") or [],
     "modelUsage": stats.get("modelUsage") or {},
-    # Static billing-model label (not measured, not estimated): Muse Spark
-    # is prepaid credits, so the hero reads PREPAID instead of SUBSCRIPTION.
-    "tierLabel": "Prepaid",
+    # No billing mode to report: the account may be prepaid credits or a
+    # subscription, and Meta exposes no way to tell locally — so the hero
+    # falls back to the panel's generic label instead of guessing.
+    "tierLabel": "",
     # No rate-limit endpoint is known for the Meta API; auth problems
     # surface in usageStatusText instead of a limits probe.
     "limits": [],
