@@ -90,7 +90,8 @@ system updates, in which case just re-run `./install.sh --system`.
 Optional: `./install.sh --with-assets` also installs the Muse marks into
 the Agents plugin assets. Stock Omarchy has no `muse.svg`, and the panel
 falls back to the generic glyph without it; note these copies live under
-`/usr/share` and may be reset by system updates.
+`/usr/share` and may be reset by system updates. The marks are the Meta
+glyph from [Simple Icons](https://simpleicons.org/icons/meta) (CC0).
 
 ## Configure
 
