@@ -1,5 +1,9 @@
 # omarchy-agent-usage-muse
 
+<p align="center">
+  <img src="preview.png" alt="The Agents panel showing the Muse tab" width="320">
+</p>
+
 Muse (Meta Muse Spark) support for Omarchy 4's **Agents** bar panel
 (`omarchy.agents`), following the panel's documented extension contract:
 the panel is display-only and renders whatever JSON record a
